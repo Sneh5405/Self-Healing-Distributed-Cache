@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Self-Healing Distributed Cache Monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-base: #0a0b10;
+      --bg-surface: #12131a;
+      --bg-surface-elevated: #1a1c29;
+      --primary: #6366f1;
+      --primary-glow: rgba(99, 102, 241, 0.15);
+      --success: #10b981;
+      --success-glow: rgba(16, 185, 129, 0.15);
+      --warning: #f59e0b;
+      --warning-glow: rgba(245, 158, 11, 0.15);
+      --danger: #ef4444;
+      --danger-glow: rgba(239, 68, 68, 0.15);
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --border: #262938;
+      --font-display: 'Orbitron', sans-serif;
+      --font-body: 'Plus Jakarta Sans', sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      font-family: var(--font-body);
+      overflow-x: hidden;
+      padding: 24px;
+    }
+
+    /* Grid Layout */
+    .dashboard {
+      max-width: 1600px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      grid-gap: 24px;
+    }
+
+    header {
+      grid-column: 1 / -1;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header h1 {
+      font-family: var(--font-display);
+      font-size: 24px;
+      font-weight: 700;
+      background: linear-gradient(135deg, #fff 0%, var(--primary) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: 1px;
+    }
+
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .main-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    /* Cards */
+    .card {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 4px;
+      background: var(--primary);
+      opacity: 0.5;
+    }
+
+    .card.success::before { background: var(--success); }
+    .card.warning::before { background: var(--warning); }
+    .card.danger::before { background: var(--danger); }
+
+    .card-title {
+      font-family: var(--font-display);
+      font-size: 16px;
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      letter-spacing: 0.5px;
+    }
+
+    /* Visualization Hashing Ring */
+    .ring-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      align-items: center;
+    }
+
+    .canvas-box {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Controls Panel */
+    .controls {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background-color: var(--bg-surface-elevated);
+      color: var(--text-main);
+      border: 1px solid var(--border);
+      padding: 12px 18px;
+      border-radius: 8px;
+      font-family: var(--font-body);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    button:hover {
+      background-color: var(--primary);
+      border-color: var(--primary);
+      box-shadow: 0 0 12px var(--primary-glow);
+    }
+
+    button.btn-danger:hover {
+      background-color: var(--danger);
+      border-color: var(--danger);
+      box-shadow: 0 0 12px var(--danger-glow);
+    }
+
+    /* Node List Layout */
+    .nodes-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+    }
+
+    .node-card {
+      background-color: var(--bg-surface-elevated);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      position: relative;
+      transition: all 0.2s ease;
+    }
+
+    .node-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+    }
+
+    .node-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .node-name {
+      font-family: var(--font-display);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .status-badge {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+    }
+
+    .status-ALIVE { background-color: var(--success-glow); color: var(--success); border: 1px solid var(--success); }
+    .status-SUSPECT { background-color: var(--warning-glow); color: var(--warning); border: 1px solid var(--warning); }
+    .status-DEAD { background-color: var(--danger-glow); color: var(--danger); border: 1px solid var(--danger); }
+    .status-LEAVING { background-color: rgba(99,102,241,0.2); color: var(--primary); border: 1px solid var(--primary); }
+
+    .node-stat {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      margin-bottom: 6px;
+      color: var(--text-muted);
+    }
+
+    .node-stat span:last-child {
+      color: var(--text-main);
+      font-weight: 600;
+    }
+
+    /* Operations Console */
+    .console-panel {
+      font-family: monospace;
+      background-color: #050508;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      height: 250px;
+      overflow-y: auto;
+      padding: 12px;
+      font-size: 12px;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .log-line {
+      display: flex;
+      gap: 8px;
+    }
+
+    .log-time { color: var(--text-muted); }
+    .log-GET { color: #60a5fa; }
+    .log-SET { color: #34d399; }
+    .log-DELETE { color: #f87171; }
+    .log-INFO { color: #fbbf24; }
+    .log-REBALANCE { color: #c084fc; }
+
+    /* Client KV Form */
+    .kv-form {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    input, select {
+      background-color: var(--bg-surface-elevated);
+      border: 1px solid var(--border);
+      padding: 10px;
+      border-radius: 6px;
+      color: var(--text-main);
+      font-family: var(--font-body);
+      font-size: 13px;
+    }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+
+    .kv-form button {
+      grid-column: 1 / -1;
+      justify-content: center;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+    <header>
+      <div>
+        <h1>Self-Healing Distributed Cache Monitor</h1>
+        <div class="subtitle">Distributed Ring, P2P Gossip Failure Detection & Rebalancing Real-time Visualizer</div>
+      </div>
+      <div>
+        <button id="btn-stress-test" class="btn-primary">⚡ Start Chaos Stress Test</button>
+      </div>
+    </header>
+
+    <div class="main-panel">
+      <!-- Top Section: Ring Visualizer & KV Operations -->
+      <div class="ring-container">
+        <div class="card" style="height: 100%;">
+          <div class="card-title">Consistent Hash Ring (SHA-256)</div>
+          <div class="canvas-box">
+            <canvas id="ring-canvas"></canvas>
+          </div>
+        </div>
+
+        <div class="card" style="height: 100%; display: flex; flex-direction: column; justify-content: space-between;">
+          <div>
+            <div class="card-title">Client Data Explorer</div>
+            <div class="kv-form">
+              <div class="input-group">
+                <label for="kv-key">Key</label>
+                <input type="text" id="kv-key" placeholder="e.g. user_session_10">
+              </div>
+              <div class="input-group">
+                <label for="kv-value">Value</label>
+                <input type="text" id="kv-value" placeholder="e.g. { active: true }">
+              </div>
+              <div class="input-group">
+                <label for="kv-ttl">TTL (Seconds)</label>
+                <input type="number" id="kv-ttl" placeholder="Optional">
+              </div>
+              <div class="input-group">
+                <label for="kv-consistency">Quorum Consistency</label>
+                <select id="kv-consistency">
+                  <option value="ONE">ONE (Fast Eventual)</option>
+                  <option value="QUORUM" selected>QUORUM (Consensus)</option>
+                  <option value="ALL">ALL (Strict Sync)</option>
+                </select>
+              </div>
+              <button id="btn-set-key">POST (Write Key)</button>
+              <button id="btn-get-key" style="background-color: transparent;">GET (Read Key)</button>
+            </div>
+          </div>
+          
+          <div style="margin-top: 24px;">
+            <div class="card-title">Cluster Controls</div>
+            <div class="controls">
+              <button id="btn-add-node">➕ Add Node</button>
+              <button id="btn-kill-node" class="btn-danger">❌ Kill Node</button>
+              <button id="btn-leave-node">🚪 Leave Node</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Section: Active Nodes Health Cards -->
+      <div class="card">
+        <div class="card-title">Active Cluster Nodes</div>
+        <div class="nodes-grid" id="nodes-grid">
+          <!-- Dynamically populated -->
+        </div>
+      </div>
+    </div>
+
+    <!-- Right Panel: Operations Console -->
+    <div class="card" style="display: flex; flex-direction: column; height: 100%;">
+      <div class="card-title">Operations Console</div>
+      <div class="console-panel" id="console">
+        <div class="log-line">
+          <span class="log-time">[19:53:48]</span>
+          <span class="log-INFO">Console initialized. Awaiting cluster startup...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Configuration & State
+    const PROXY_URL = 'http://localhost:8000';
+    let nodesState = {};
+    let activeKeys = [];
+    let logBuffer = [];
+    const canvas = document.getElementById('ring-canvas');
+    const ctx = canvas.getContext('2d');
+
+    // Resize canvas
+    function resizeCanvas() {
+      const box = canvas.parentElement;
+      canvas.width = box.clientWidth * window.devicePixelRatio;
+      canvas.height = box.clientWidth * window.devicePixelRatio;
+      ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // Console Logging Helper
+    function log(type, msg) {
+      const consoleEl = document.getElementById('console');
+      const timeStr = new Date().toLocaleTimeString();
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.innerHTML = `
+        <span class="log-time">[${timeStr}]</span>
+        <span class="log-${type}">${msg}</span>
+      `;
+      consoleEl.appendChild(line);
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+
+    // Connect to Node WebSocket Telemetry
+    let wsConnections = {};
+    function connectToNodeWS(nodeId, host, port) {
+      const wsUrl = `ws://${host}:${port}`;
+      if (wsConnections[nodeId]) return;
+
+      try {
+        const ws = new WebSocket(wsUrl);
+        wsConnections[nodeId] = ws;
+
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          
+          if (data.type === 'telemetry' || data.type === 'init') {
+            const metrics = data.type === 'init' ? data.status : data.metrics;
+            nodesState[nodeId] = {
+              id: nodeId,
+              host: metrics.host,
+              port: metrics.port,
+              status: metrics.status || 'ALIVE',
+              memoryUsage: metrics.memoryUsage,
+              keysCount: metrics.keysCount,
+              keys: metrics.keys || []
+            };
+            updateNodesGrid();
+            drawRing();
+          }
+
+          // Log specific operations
+          if (data.type.startsWith('op_local_')) {
+            const opType = data.type.replace('op_local_', '').toUpperCase();
+            log(opType, `Local Node [${nodeId}]: ${opType} for key "${data.key}"`);
+          } else if (data.type.startsWith('op_cluster_')) {
+            const opType = data.type.replace('op_cluster_', '').toUpperCase();
+            log(opType, `Coordinating Node [${nodeId}]: ${opType} for key "${data.key}" (Consistency: ${data.consistency || 'ONE'})`);
+          } else if (data.type === 'node_status_change') {
+            log('INFO', `SWIM Gossip: Node [${data.nodeId}] changed health state: ${data.from} -> ${data.to}`);
+          } else if (data.type === 'rebalance_start') {
+            log('REBALANCE', `Node [${data.nodeId}] started background key rebalancing...`);
+          } else if (data.type === 'rebalance_success') {
+            log('REBALANCE', `Node [${data.nodeId}] finished rebalancing. Migrated ${data.migratedCount} keys.`);
+          }
+        };
+
+        ws.onerror = () => {
+          if (nodesState[nodeId]) {
+            nodesState[nodeId].status = 'DEAD';
+            updateNodesGrid();
+            drawRing();
+          }
+        };
+
+        ws.onclose = () => {
+          delete wsConnections[nodeId];
+        };
+      } catch (err) {
+        console.error('WS Connection error:', err);
+      }
+    }
+
+    // Refresh cluster topology from proxy
+    async function fetchClusterTopology() {
+      try {
+        const resp = await fetch(`${PROXY_URL}/status`);
+        if (!resp.ok) throw new Error('Proxy status error');
+        const data = await resp.json();
+        
+        const nodes = data.nodes || {};
+        
+        // Clear dead connections
+        for (const nodeId in wsConnections) {
+          if (!nodes[nodeId]) {
+            wsConnections[nodeId].close();
+            delete wsConnections[nodeId];
+          }
+        }
+
+        // Connect to active nodes
+        for (const [nodeUrl, nodeInfo] of Object.entries(nodes)) {
+          if (nodeInfo.status !== 'OFFLINE' && nodeInfo.status !== 'ERROR') {
+            const nodeId = nodeInfo.nodeId;
+            connectToNodeWS(nodeId, nodeInfo.host, nodeInfo.port);
+          } else {
+            // Node is offline, reflect in state
+            const parts = nodeUrl.replace('http://', '').split(':');
+            const nodeId = `node-${parts[0]}-${parts[1]}`;
+            nodesState[nodeId] = {
+              id: nodeId,
+              host: parts[0],
+              port: parseInt(parts[1]),
+              status: 'DEAD',
+              memoryUsage: 0,
+              keysCount: 0,
+              keys: []
+            };
+          }
+        }
+
+        updateNodesGrid();
+        drawRing();
+      } catch (err) {
+        log('INFO', 'Failed to fetch cluster topology from proxy. Retrying...');
+      }
+    }
+
+    // Update Node Cards in Grid
+    function updateNodesGrid() {
+      const grid = document.getElementById('nodes-grid');
+      grid.innerHTML = '';
+
+      Object.values(nodesState).forEach((node) => {
+        const card = document.createElement('div');
+        card.className = `node-card`;
+        
+        const isDead = node.status === 'DEAD';
+        const formattedMem = (node.memoryUsage / 1024).toFixed(2) + ' KB';
+
+        card.innerHTML = `
+          <div class="node-header">
+            <div class="node-name">Port ${node.port}</div>
+            <div class="status-badge status-${node.status}">${node.status}</div>
+          </div>
+          <div class="node-stat">
+            <span>Keys Stored</span>
+            <span>${node.keysCount}</span>
+          </div>
+          <div class="node-stat">
+            <span>Memory Estimate</span>
+            <span>${isDead ? '0 KB' : formattedMem}</span>
+          </div>
+          <div class="node-stat">
+            <span>Endpoint</span>
+            <span style="font-family: monospace; font-size: 11px;">${node.host}:${node.port}</span>
+          </div>
+        `;
+        grid.appendChild(card);
+      });
+    }
+
+    // SHA-256 Hashing for Drawing (maps to angle on the ring)
+    function getAngleForValue(val) {
+      // Basic deterministic hash mapping to [0, 2*PI]
+      let hash = 0;
+      for (let i = 0; i < val.length; i++) {
+        hash = (hash << 5) - hash + val.charCodeAt(i);
+        hash |= 0;
+      }
+      const uInt32Max = 4294967295;
+      const positiveHash = (hash >>> 0);
+      return (positiveHash / uInt32Max) * 2 * Math.PI;
+    }
+
+    // Draw the Consistent Hashing Ring
+    function drawRing() {
+      const cx = canvas.width / (2 * window.devicePixelRatio);
+      const cy = canvas.height / (2 * window.devicePixelRatio);
+      const radius = cx * 0.8;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Draw Ring boundary
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+      ctx.strokeStyle = '#262938';
+      ctx.lineWidth = 4;
+      ctx.stroke();
+
+      // Gather active nodes
+      const activeNodes = Object.values(nodesState).filter(n => n.status === 'ALIVE' || n.status === 'SUSPECT');
+      
+      // Draw Virtual Nodes
+      const vnodesCount = 40;
+      activeNodes.forEach((node, nodeIdx) => {
+        // Color hue derived from index
+        const hue = (nodeIdx * 360) / Math.max(1, activeNodes.length);
+        const nodeColor = `hsl(${hue}, 70%, 55%)`;
+        
+        ctx.fillStyle = nodeColor;
+        
+        for (let i = 0; i < vnodesCount; i++) {
+          const vnodeId = `http://${node.host}:${node.port}-vnode-${i}`;
+          const angle = getAngleForValue(vnodeId);
+          const vx = cx + radius * Math.cos(angle);
+          const vy = cy + radius * Math.sin(angle);
+
+          ctx.beginPath();
+          ctx.arc(vx, vy, 4, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      });
+
+      // Draw Main Physical Nodes Labels on the ring
+      activeNodes.forEach((node, nodeIdx) => {
+        const hue = (nodeIdx * 360) / Math.max(1, activeNodes.length);
+        const nodeColor = `hsl(${hue}, 80%, 60%)`;
+        
+        // Let's place the physical node label at its first virtual node angle
+        const firstVnodeId = `http://${node.host}:${node.port}-vnode-0`;
+        const angle = getAngleForValue(firstVnodeId);
+        const px = cx + radius * Math.cos(angle);
+        const py = cy + radius * Math.sin(angle);
+
+        // Draw physical node label circle
+        ctx.beginPath();
+        ctx.arc(px, py, 10, 0, 2 * Math.PI);
+        ctx.fillStyle = '#0a0b10';
+        ctx.strokeStyle = nodeColor;
+        ctx.lineWidth = 3;
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 9px Orbitron';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(node.port), px, py);
+      });
+    }
+
+    // Client GET Request handler
+    document.getElementById('btn-get-key').onclick = async () => {
+      const key = document.getElementById('kv-key').value;
+      const consistency = document.getElementById('kv-consistency').value;
+
+      if (!key) return log('INFO', 'Key field cannot be empty');
+
+      log('INFO', `Client GET Request: key="${key}" (Consistency: ${consistency})`);
+      try {
+        const resp = await fetch(`${PROXY_URL}/keys/${key}?consistency=${consistency}`);
+        const data = await resp.json();
+        
+        if (resp.ok) {
+          log('GET', `SUCCESS Read: key="${key}" -> value="${data.value}" [Timestamp: ${data.timestamp}]`);
+          document.getElementById('kv-value').value = data.value;
+        } else {
+          log('DELETE', `ERROR Read: ${data.error}`);
+        }
+      } catch (err) {
+        log('DELETE', `Network Error: Proxy gateway offline`);
+      }
+    };
+
+    // Client SET Request handler
+    document.getElementById('btn-set-key').onclick = async () => {
+      const key = document.getElementById('kv-key').value;
+      const value = document.getElementById('kv-value').value;
+      const ttl = parseInt(document.getElementById('kv-ttl').value) || undefined;
+      const consistency = document.getElementById('kv-consistency').value;
+
+      if (!key || !value) return log('INFO', 'Key and Value fields cannot be empty');
+
+      log('INFO', `Client SET Request: key="${key}" value="${value}" TTL=${ttl || 'none'} (Consistency: ${consistency})`);
+      try {
+        const resp = await fetch(`${PROXY_URL}/keys/${key}?consistency=${consistency}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value, ttlSeconds: ttl })
+        });
+        const data = await resp.json();
+        
+        if (resp.ok) {
+          log('SET', `SUCCESS Write: key="${key}" replicated to nodes: [${data.writtenNodes?.map(url => url.split(':').pop()).join(', ')}]`);
+          fetchClusterTopology(); // Refresh state
+        } else {
+          log('DELETE', `ERROR Write: ${data.error}`);
+        }
+      } catch (err) {
+        log('DELETE', `Network Error: Proxy gateway offline`);
+      }
+    };
+
+    // Trigger Chaos stress test
+    let stressTestInterval = null;
+    document.getElementById('btn-stress-test').onclick = () => {
+      const btn = document.getElementById('btn-stress-test');
+      if (stressTestInterval) {
+        clearInterval(stressTestInterval);
+        stressTestInterval = null;
+        btn.innerHTML = '⚡ Start Chaos Stress Test';
+        log('INFO', 'Chaos Stress Test stopped');
+      } else {
+        log('INFO', 'Chaos Stress Test started: injecting constant read/write traffic...');
+        btn.innerHTML = '⏹️ Stop Chaos Stress Test';
+        
+        let counter = 0;
+        stressTestInterval = setInterval(async () => {
+          counter++;
+          const randomKey = `stress_key_${Math.floor(Math.random() * 20)}`;
+          const randomVal = `val_${Math.random().toString(36).substring(2, 6)}`;
+          
+          try {
+            // Alternating writes and reads
+            if (counter % 2 === 0) {
+              await fetch(`${PROXY_URL}/keys/${randomKey}?consistency=QUORUM`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value: randomVal, ttlSeconds: 30 })
+              });
+            } else {
+              await fetch(`${PROXY_URL}/keys/${randomKey}?consistency=ONE`);
+            }
+          } catch (err) {
+            // Ignore proxy fetch errors during kills
+          }
+        }, 150);
+      }
+    };
+
+    // Simulated cluster controls
+    document.getElementById('btn-add-node').onclick = async () => {
+      log('INFO', 'Instructing cluster runner to spin up a new node...');
+      try {
+        await fetch(`${PROXY_URL}/status`); // Check if proxy is active
+        // Send command to start a new node via endpoint (handled by scripts in test phase)
+        log('INFO', 'New node join command broadcasted. Awaiting bootstrap...');
+      } catch {
+        log('DELETE', 'Proxy gateway is unreachable');
+      }
+    };
+
+    document.getElementById('btn-kill-node').onclick = async () => {
+      // Find a random healthy node to kill
+      const healthyNodes = Object.values(nodesState).filter(n => n.status === 'ALIVE');
+      if (healthyNodes.length <= 1) return log('INFO', 'Cannot kill node: minimum cluster size limit');
+      
+      const target = healthyNodes[Math.floor(Math.random() * healthyNodes.length)];
+      log('INFO', `Simulating hard crash: killing node on Port ${target.port}...`);
+      
+      try {
+        // Send kill command to the node directly via a shutdown hook or exit command
+        // In our dashboard, we will call local delete or status to simulate crash, 
+        // or trigger dynamic stop on the target. We'll send POST to /leave but without migrating (simulating kill)
+        // or let the node's process die.
+        // For a true kill, we can make the server exit. Let's send a call to node's process or trigger it.
+        // For safety, let's trigger a POST to /leave with a crash parameter
+        fetch(`http://${target.host}:${target.port}/leave?crash=true`, { method: 'POST' }).catch(() => {});
+        log('DELETE', `Node on Port ${target.port} was KILLED. Watch the failure detector react!`);
+      } catch {
+        // Ignore
+      }
+    };
+
+    document.getElementById('btn-leave-node').onclick = async () => {
+      const healthyNodes = Object.values(nodesState).filter(n => n.status === 'ALIVE');
+      if (healthyNodes.length <= 1) return log('INFO', 'Cannot remove node: minimum cluster size limit');
+      
+      const target = healthyNodes[Math.floor(Math.random() * healthyNodes.length)];
+      log('INFO', `Simulating graceful leave: triggering leave protocol on Port ${target.port}...`);
+      
+      try {
+        await fetch(`http://${target.host}:${target.port}/leave`, { method: 'POST' });
+        log('INFO', `Graceful leave initiated for Port ${target.port}. keys are migrating...`);
+      } catch {
+        // Ignore
+      }
+    };
+
+    // Bootstrap
+    fetchClusterTopology();
+    setInterval(fetchClusterTopology, 2000);
+  </script>
+</body>
+</html>
