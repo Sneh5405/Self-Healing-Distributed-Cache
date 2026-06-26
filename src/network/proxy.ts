@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import * as http from 'http';
 import * as path from 'path';
 import { ConsistentHashRing } from '../core/hashRing';
+import { CacheNodeServer } from './server';
 
 export class ClientProxy {
   private port: number;
@@ -13,6 +14,8 @@ export class ClientProxy {
   private app: express.Application;
   private server: http.Server | null = null;
   private syncInterval: NodeJS.Timeout | null = null;
+  private spawnedNodes: CacheNodeServer[] = [];
+  private spawningPorts: Set<number> = new Set();
 
   constructor(options: {
     port: number;
@@ -63,6 +66,16 @@ export class ClientProxy {
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
     }
+    
+    // Stop all dynamically spawned nodes
+    for (const node of this.spawnedNodes) {
+      try {
+        await node.stop();
+      } catch (err: any) {
+        console.error(`[Proxy Gateway] Error stopping spawned node on port ${node.port}:`, err.message);
+      }
+    }
+    
     return new Promise((resolve) => {
       if (this.server) {
         this.server.close(() => {
@@ -73,6 +86,39 @@ export class ClientProxy {
         resolve();
       }
     });
+  }
+
+  private getPortFromUrl(url: string): number | null {
+    try {
+      const portStr = new URL(url).port;
+      return portStr ? parseInt(portStr, 10) : null;
+    } catch {
+      const parts = url.split(':');
+      const port = parseInt(parts[parts.length - 1], 10);
+      return isNaN(port) ? null : port;
+    }
+  }
+
+  private getNextAvailablePort(): number {
+    const activePorts = new Set<number>(this.spawningPorts);
+    
+    for (const url of this.seedUrls) {
+      const port = this.getPortFromUrl(url);
+      if (port !== null) activePorts.add(port);
+    }
+    for (const url of this.activeNodes) {
+      const port = this.getPortFromUrl(url);
+      if (port !== null) activePorts.add(port);
+    }
+    for (const node of this.spawnedNodes) {
+      activePorts.add(node.port);
+    }
+
+    let port = 8001;
+    while (activePorts.has(port)) {
+      port++;
+    }
+    return port;
   }
 
   /**
@@ -251,6 +297,38 @@ export class ClientProxy {
         activeNodes: Array.from(this.activeNodes),
         nodes: report
       });
+    });
+
+    // Dynamic scale-up: spawn a new cluster node
+    this.app.post('/nodes', async (req: Request, res: Response) => {
+      let nextPort: number | null = null;
+      try {
+        nextPort = this.getNextAvailablePort();
+        this.spawningPorts.add(nextPort);
+        
+        console.log(`[Proxy Gateway] Dynamically scaling up: spawning new node on port ${nextPort}...`);
+        const node = new CacheNodeServer(nextPort, 'localhost');
+        await node.start();
+        
+        // Initialize cluster with seeds
+        node.initializeCluster(this.seedUrls, this.replicationFactor);
+        
+        this.spawnedNodes.push(node);
+        this.spawningPorts.delete(nextPort);
+        
+        res.json({
+          success: true,
+          nodeId: node.id,
+          port: nextPort,
+          message: `Node ${node.id} successfully started and joined the cluster.`
+        });
+      } catch (err: any) {
+        if (nextPort !== null) {
+          this.spawningPorts.delete(nextPort);
+        }
+        console.error(`[Proxy Gateway] Failed to scale up node:`, err);
+        res.status(500).json({ error: `Failed to spawn node: ${err.message}` });
+      }
     });
   }
 }

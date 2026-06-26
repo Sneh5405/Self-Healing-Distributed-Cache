@@ -732,10 +732,15 @@
     document.getElementById('btn-add-node').onclick = async () => {
       log('INFO', 'Instructing cluster runner to spin up a new node...');
       try {
-        await fetch(`${PROXY_URL}/status`); // Check if proxy is active
-        // Send command to start a new node via endpoint (handled by scripts in test phase)
-        log('INFO', 'New node join command broadcasted. Awaiting bootstrap...');
-      } catch {
+        const resp = await fetch(`${PROXY_URL}/nodes`, { method: 'POST' });
+        const data = await resp.json();
+        if (resp.ok && data.success) {
+          log('INFO', `Scale-up Success: Node spawned on Port ${data.port}. Joining cluster...`);
+          fetchClusterTopology();
+        } else {
+          log('DELETE', `Scale-up Failed: ${data.error || 'Unknown error'}`);
+        }
+      } catch (err) {
         log('DELETE', 'Proxy gateway is unreachable');
       }
     };
