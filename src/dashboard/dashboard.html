@@ -65,6 +65,7 @@
       font-weight: 700;
       background: linear-gradient(135deg, #fff 0%, var(--primary) 100%);
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
       letter-spacing: 1px;
     }
@@ -636,6 +637,51 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(node.port), px, py);
+      });
+
+      // Draw Keys on the ring
+      const uniqueKeys = new Set();
+      activeNodes.forEach((node) => {
+        if (node.keys && Array.isArray(node.keys)) {
+          node.keys.forEach((key) => {
+            uniqueKeys.add(key);
+          });
+        }
+      });
+
+      uniqueKeys.forEach((key) => {
+        const angle = getAngleForValue(key);
+        const kx = cx + radius * Math.cos(angle);
+        const ky = cy + radius * Math.sin(angle);
+
+        // Draw key point with a cyan glow
+        ctx.beginPath();
+        ctx.arc(kx, ky, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = '#22d3ee'; // cyan-400
+        ctx.strokeStyle = '#0891b2'; // cyan-600
+        ctx.lineWidth = 1.5;
+        ctx.fill();
+        ctx.stroke();
+
+        // Draw small key label if count is small (e.g. <= 20 keys) to avoid clutter
+        if (uniqueKeys.size <= 20) {
+          ctx.fillStyle = '#22d3ee'; // cyan-400
+          ctx.font = '9px Orbitron';
+          ctx.textBaseline = 'middle';
+          
+          // Offset text slightly from the point
+          const tx = cx + (radius + 15) * Math.cos(angle);
+          const ty = cy + (radius + 15) * Math.sin(angle);
+          
+          // Adjust alignment depending on the side of the ring
+          if (Math.cos(angle) < 0) {
+            ctx.textAlign = 'right';
+          } else {
+            ctx.textAlign = 'left';
+          }
+          
+          ctx.fillText(key, tx, ty);
+        }
       });
     }
 

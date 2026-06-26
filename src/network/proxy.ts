@@ -125,7 +125,8 @@ export class ClientProxy {
    * Synchronizes membership status of the cluster using seed nodes or known active nodes.
    */
   private async synchronizeClusterView(): Promise<void> {
-    const nodesToTry = [...this.activeNodes, ...this.seedUrls];
+    const spawnedUrls = this.spawnedNodes.map(node => `http://${node.host}:${node.port}`);
+    const nodesToTry = Array.from(new Set([...this.activeNodes, ...this.seedUrls, ...spawnedUrls]));
     
     for (const url of nodesToTry) {
       try {
@@ -160,7 +161,11 @@ export class ClientProxy {
             // Cleanup any nodes no longer reported by the cluster
             for (const activeUrl of this.activeNodes) {
               const matchedMember = members.find((m: any) => `http://${m.host}:${m.port}` === activeUrl);
-              if (!matchedMember && !this.seedUrls.includes(activeUrl)) {
+              const isSpawnedAndAlive = this.spawnedNodes.some(node => {
+                const spawnedNodeUrl = `http://${node.host}:${node.port}`;
+                return spawnedNodeUrl === activeUrl && node.gossipManager?.getLocalStatus() === 'ALIVE';
+              });
+              if (!matchedMember && !this.seedUrls.includes(activeUrl) && !isSpawnedAndAlive) {
                 this.hashRing.removeNode(activeUrl);
                 this.activeNodes.delete(activeUrl);
               }
@@ -312,6 +317,11 @@ export class ClientProxy {
         
         // Initialize cluster with seeds
         node.initializeCluster(this.seedUrls, this.replicationFactor);
+        
+        // Add new node URL to activeNodes and hashRing immediately
+        const nodeUrl = `http://${node.host}:${node.port}`;
+        this.activeNodes.add(nodeUrl);
+        this.hashRing.addNode(nodeUrl);
         
         this.spawnedNodes.push(node);
         this.spawningPorts.delete(nextPort);
