@@ -25,6 +25,13 @@ export class ClientProxy {
   private syncInterval: NodeJS.Timeout | null = null;
   private spawnedNodes: CacheNodeServer[] = [];
   private spawningPorts: Set<number> = new Set();
+  
+  // Autoscaler state variables
+  private scaleUpThreshold = 15;
+  private scaleDownThreshold = 5;
+  private autoscalerInterval = 5000;
+  private autoscaleTimer: NodeJS.Timeout | null = null;
+  private isScalingInProgress = false;
 
   constructor(options: {
     port: number;
@@ -59,6 +66,9 @@ export class ClientProxy {
     // Periodically update cluster topology
     this.syncInterval = setInterval(() => this.synchronizeClusterView(), 3000);
 
+    // Start background autoscaling monitor
+    this.autoscaleTimer = setInterval(() => this.checkAutoscaling(), this.autoscalerInterval);
+
     return new Promise((resolve) => {
       this.server = this.app.listen(this.port, () => {
         console.log(`[Proxy Gateway] Listening on http://localhost:${this.port}`);
@@ -74,6 +84,11 @@ export class ClientProxy {
   public async stop(): Promise<void> {
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
+    }
+
+    if (this.autoscaleTimer) {
+      clearInterval(this.autoscaleTimer);
+      this.autoscaleTimer = null;
     }
     
     // Stop all dynamically spawned nodes
@@ -185,6 +200,98 @@ export class ClientProxy {
         }
       } catch (err) {
         // Suppress errors and try next node
+      }
+    }
+  }
+
+  /**
+   * Monitor cluster load and dynamically adjust cluster size.
+   */
+  private async checkAutoscaling(): Promise<void> {
+    if (this.isScalingInProgress) return;
+
+    // Gather status reports from all active nodes
+    const healthyNodes: Array<{ url: string; keysCount: number; port: number }> = [];
+    
+    const promises = Array.from(this.activeNodes).map(async (url) => {
+      try {
+        const resp = await fetch(`${url}/status`, { signal: AbortSignal.timeout(1000) });
+        if (resp.ok) {
+          const status = await resp.json();
+          if (status.status === 'ALIVE' || status.status === 'SUSPECT') {
+            healthyNodes.push({
+              url,
+              keysCount: status.keysCount || 0,
+              port: status.port
+            });
+          }
+        }
+      } catch (err) {
+        // Node is offline or errored
+      }
+    });
+
+    await Promise.all(promises);
+
+    if (healthyNodes.length === 0) return;
+
+    // Calculate average keys count per healthy node
+    const totalKeys = healthyNodes.reduce((sum, n) => sum + n.keysCount, 0);
+    const avgKeys = totalKeys / healthyNodes.length;
+
+    console.log(`[Autoscaler] Monitoring load: ${totalKeys} keys across ${healthyNodes.length} nodes (Avg: ${avgKeys.toFixed(2)} keys/node)`);
+
+    // Scale Up decision
+    if (avgKeys > this.scaleUpThreshold && this.spawnedNodes.length < 3) {
+      this.isScalingInProgress = true;
+      console.log(`[Autoscaler] LOAD EXCEEDS THRESHOLD (${avgKeys.toFixed(2)} > ${this.scaleUpThreshold}). Scaling up...`);
+      try {
+        const nextPort = this.getNextAvailablePort();
+        this.spawningPorts.add(nextPort);
+        
+        console.log(`[Proxy Gateway] [Autoscaler] Dynamically spawning new node on port ${nextPort}...`);
+        const node = new CacheNodeServer(nextPort, 'localhost');
+        await node.start();
+        
+        // Initialize cluster with seeds
+        node.initializeCluster(this.seedUrls, this.replicationFactor);
+        
+        // Add new node URL to activeNodes and hashRing immediately
+        const nodeUrl = `http://${node.host}:${node.port}`;
+        this.activeNodes.add(nodeUrl);
+        this.hashRing.addNode(nodeUrl);
+        
+        this.spawnedNodes.push(node);
+        this.spawningPorts.delete(nextPort);
+        console.log(`[Autoscaler] Scale-up Success: Node spawned on Port ${nextPort} and joined cluster.`);
+      } catch (err: any) {
+        console.error(`[Autoscaler] Scale-up Failed:`, err.message);
+      } finally {
+        this.isScalingInProgress = false;
+      }
+    }
+    // Scale Down decision
+    else if (avgKeys < this.scaleDownThreshold && this.spawnedNodes.length > 0) {
+      this.isScalingInProgress = true;
+      const lastNode = this.spawnedNodes[this.spawnedNodes.length - 1];
+      console.log(`[Autoscaler] LOAD BELOW THRESHOLD (${avgKeys.toFixed(2)} < ${this.scaleDownThreshold}). Scaling down node on port ${lastNode.port}...`);
+      try {
+        const targetUrl = `http://${lastNode.host}:${lastNode.port}`;
+        
+        // Remove from proxy activeNodes and hashRing immediately so no new traffic is routed to it
+        this.activeNodes.delete(targetUrl);
+        this.hashRing.removeNode(targetUrl);
+        
+        // Call graceful /leave on the node itself to migrate its keys
+        await fetch(`${targetUrl}/leave`, { method: 'POST', signal: AbortSignal.timeout(3000) }).catch(() => {});
+        
+        // Remove from spawned list
+        this.spawnedNodes.pop();
+        console.log(`[Autoscaler] Scale-down Success: Node on Port ${lastNode.port} gracefully left and was shut down.`);
+      } catch (err: any) {
+        console.error(`[Autoscaler] Scale-down Failed:`, err.message);
+      } finally {
+        this.isScalingInProgress = false;
       }
     }
   }

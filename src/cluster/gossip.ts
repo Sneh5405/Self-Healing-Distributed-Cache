@@ -17,7 +17,7 @@ export class GossipManager {
   ) {
     this.server = server;
     this.pingIntervalMs = options?.pingIntervalMs || 1000;
-    this.suspectTimeoutMs = options?.suspectTimeoutMs || 5000;
+    this.suspectTimeoutMs = options?.suspectTimeoutMs || 10000;
     this.rebalancer = new ClusterRebalancer(server);
 
     // Initialize local node info

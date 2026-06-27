@@ -757,7 +757,7 @@
         let counter = 0;
         stressTestInterval = setInterval(async () => {
           counter++;
-          const randomKey = `stress_key_${Math.floor(Math.random() * 20)}`;
+          const randomKey = `stress_key_${Math.floor(Math.random() * 500)}`;
           const randomVal = `val_${Math.random().toString(36).substring(2, 6)}`;
           
           try {
