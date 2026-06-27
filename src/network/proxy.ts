@@ -4,6 +4,15 @@ import * as path from 'path';
 import { ConsistentHashRing } from '../core/hashRing';
 import { CacheNodeServer } from './server';
 
+class HTTPError extends Error {
+  public status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+    this.name = 'HTTPError';
+  }
+}
+
 export class ClientProxy {
   private port: number;
   private seedUrls: string[];
@@ -219,9 +228,19 @@ export class ClientProxy {
           return await response.json();
         } else {
           const errData = await response.json().catch(() => ({}));
-          throw new Error(errData.error || `HTTP error ${response.status}`);
+          const errorMsg = errData.error || `HTTP error ${response.status}`;
+          
+          if (response.status >= 400 && response.status < 500) {
+            throw new HTTPError(response.status, errorMsg);
+          }
+          
+          throw new Error(errorMsg);
         }
       } catch (err: any) {
+        if (err instanceof HTTPError) {
+          throw err;
+        }
+        
         console.warn(`[Proxy Gateway] Request ${method} ${path} failed on ${nodeUrl} (Attempt ${attempt + 1}/${attempts}): ${err.message}`);
         lastError = err;
         
@@ -249,7 +268,8 @@ export class ClientProxy {
         const data = await this.forwardRequest(key, 'GET', `/keys/${key}`, undefined, consistency);
         res.json(data);
       } catch (err: any) {
-        res.status(503).json({ error: `Proxy read failed: ${err.message}` });
+        const status = err.status || 503;
+        res.status(status).json({ error: err.message || 'Proxy read failed' });
       }
     });
 
@@ -263,7 +283,8 @@ export class ClientProxy {
         const data = await this.forwardRequest(key, 'POST', `/keys/${key}`, { value, ttlSeconds, timestamp }, consistency);
         res.json(data);
       } catch (err: any) {
-        res.status(503).json({ error: `Proxy write failed: ${err.message}` });
+        const status = err.status || 503;
+        res.status(status).json({ error: err.message || 'Proxy write failed' });
       }
     });
 
@@ -275,7 +296,8 @@ export class ClientProxy {
         const data = await this.forwardRequest(key, 'DELETE', `/keys/${key}`);
         res.json(data);
       } catch (err: any) {
-        res.status(503).json({ error: `Proxy delete failed: ${err.message}` });
+        const status = err.status || 503;
+        res.status(status).json({ error: err.message || 'Proxy delete failed' });
       }
     });
 

@@ -490,11 +490,15 @@
         
         const nodes = data.nodes || {};
         
-        // Clear dead connections
+        // Clear dead/offline connections
         for (const nodeId in wsConnections) {
-          if (!nodes[nodeId]) {
-            wsConnections[nodeId].close();
-            delete wsConnections[nodeId];
+          const activeNodeInfo = Object.values(nodes).find(nodeInfo => nodeInfo.nodeId === nodeId);
+          const isAliveOrSuspect = activeNodeInfo && activeNodeInfo.status !== 'OFFLINE' && activeNodeInfo.status !== 'ERROR';
+          if (!isAliveOrSuspect) {
+            if (wsConnections[nodeId]) {
+              wsConnections[nodeId].close();
+              delete wsConnections[nodeId];
+            }
           }
         }
 
