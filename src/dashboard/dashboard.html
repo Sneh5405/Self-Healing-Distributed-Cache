@@ -503,14 +503,17 @@
         }
 
         // Connect to active nodes
+        const reportedNodeIds = new Set();
         for (const [nodeUrl, nodeInfo] of Object.entries(nodes)) {
           if (nodeInfo.status !== 'OFFLINE' && nodeInfo.status !== 'ERROR') {
             const nodeId = nodeInfo.nodeId;
+            reportedNodeIds.add(nodeId);
             connectToNodeWS(nodeId, nodeInfo.host, nodeInfo.port);
           } else {
             // Node is offline, reflect in state
             const parts = nodeUrl.replace('http://', '').split(':');
             const nodeId = `node-${parts[0]}-${parts[1]}`;
+            reportedNodeIds.add(nodeId);
             nodesState[nodeId] = {
               id: nodeId,
               host: parts[0],
@@ -520,6 +523,23 @@
               keysCount: 0,
               keys: []
             };
+          }
+        }
+
+        // Clean up or mark DEAD nodes that are not in the reported list
+        for (const nodeId in nodesState) {
+          if (!reportedNodeIds.has(nodeId)) {
+            const port = nodesState[nodeId].port;
+            if (port >= 8006) {
+              // Delete spawned nodes that have left
+              delete nodesState[nodeId];
+            } else {
+              // Keep seed nodes but mark them DEAD
+              nodesState[nodeId].status = 'DEAD';
+              nodesState[nodeId].keysCount = 0;
+              nodesState[nodeId].memoryUsage = 0;
+              nodesState[nodeId].keys = [];
+            }
           }
         }
 
@@ -558,6 +578,15 @@
           <div class="node-stat">
             <span>Endpoint</span>
             <span style="font-family: monospace; font-size: 11px;">${node.host}:${node.port}</span>
+          </div>
+          <div class="node-keys-list" style="margin-top: 12px; font-size: 11px; max-height: 80px; overflow-y: auto; border-top: 1px solid var(--border); padding-top: 8px; color: var(--text-muted);">
+            <div style="font-weight: bold; margin-bottom: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Keys List:</div>
+            ${node.keys && node.keys.length > 0 
+              ? `<div style="display: flex; flex-wrap: wrap; gap: 4px;">
+                  ${node.keys.map(k => `<span style="background: rgba(34,211,238,0.15); color: #22d3ee; border: 1px solid rgba(34,211,238,0.3); padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 10px;">${k}</span>`).join('')}
+                 </div>`
+              : '<span style="font-style: italic;">None</span>'
+            }
           </div>
         `;
         grid.appendChild(card);
