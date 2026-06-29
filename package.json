@@ -9,7 +9,9 @@
     "dev": "ts-node src/index.ts",
     "cluster:start": "ts-node src/scripts/startCluster.ts",
     "test:resilience": "ts-node src/tests/loadTest.ts",
-    "seed:stress": "ts-node src/scripts/createStressKeys.ts"
+    "seed:stress": "ts-node src/scripts/createStressKeys.ts",
+    "load:simulate": "ts-node src/scripts/simulateAutoscaleLoad.ts",
+    "test:autoscale": "ts-node src/tests/testAutoscale.ts"
   },
   "dependencies": {
     "express": "^4.19.2",

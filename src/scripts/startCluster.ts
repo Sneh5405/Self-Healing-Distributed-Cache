@@ -2,11 +2,11 @@ import { CacheNodeServer } from '../network/server';
 import { ClientProxy } from '../network/proxy';
 
 async function main() {
-  const ports = [8001, 8002, 8003, 8004, 8005];
+  const ports = [8001, 8002, 8003];
   const host = 'localhost';
   const seeds = ports.map((port) => `http://${host}:${port}`);
   
-  console.log('[Cluster Bootstrap] Starting 5 cache nodes...');
+  console.log('[Cluster Bootstrap] Starting 3 cache nodes...');
   const nodes: CacheNodeServer[] = [];
   
   for (const port of ports) {
@@ -23,7 +23,23 @@ async function main() {
     port: 8000,
     seedUrls: seeds,
     replicationFactor: 2,
-    maxRetries: 1 // Allow 1 retry on replica if primary fails
+    maxRetries: 1, // Allow 1 retry on replica if primary fails
+    minNodes: 3,
+    maxNodes: 10,
+    scaleUpThreshold: {
+      cpu: 75,
+      memory: 80,
+      rps: 5000
+    },
+    scaleDownThreshold: {
+      cpu: 30,
+      memory: 40,
+      rps: 2000
+    },
+    cooldown: {
+      scaleUp: 30,
+      scaleDown: 120
+    }
   });
   
   await proxy.start();

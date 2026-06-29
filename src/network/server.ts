@@ -32,10 +32,18 @@ export class CacheNodeServer {
   public gossipManager: GossipManager | null = null;
   public replicationManager: ReplicationManager | null = null;
 
+  // Metrics tracking
+  private requestCount = 0;
+  private rps = 0;
+  private lastRpsUpdate = Date.now();
+  private maxMemoryBytes: number;
+  private rpsTimer: NodeJS.Timeout | null = null;
+
   constructor(port: number, host: string = 'localhost', maxMemoryBytes: number = 50 * 1024 * 1024) { // Default 50MB
     this.port = port;
     this.host = host;
     this.id = `node-${host}-${port}`;
+    this.maxMemoryBytes = maxMemoryBytes;
     this.store = new InMemoryStore({ maxMemoryBytes, evictionPolicy: 'NONE' });
 
     this.app = express();
@@ -46,6 +54,15 @@ export class CacheNodeServer {
     this.httpServer = http.createServer(this.app);
     this.wss = new WebSocketServer({ server: this.httpServer });
     this.setupWebSockets();
+
+    // Start periodic RPS calculation
+    this.rpsTimer = setInterval(() => {
+      const now = Date.now();
+      const delta = (now - this.lastRpsUpdate) / 1000;
+      this.rps = this.requestCount / (delta || 1);
+      this.requestCount = 0;
+      this.lastRpsUpdate = now;
+    }, 1000);
   }
 
   /**
@@ -105,6 +122,11 @@ export class CacheNodeServer {
     // Notify WebSocket clients
     this.broadcast({ type: 'node_shutdown', nodeId: this.id });
     
+    if (this.rpsTimer) {
+      clearInterval(this.rpsTimer);
+      this.rpsTimer = null;
+    }
+
     if (this.gossipManager) {
       this.gossipManager.stop();
     }
@@ -163,12 +185,32 @@ export class CacheNodeServer {
     }, 2000);
   }
 
+  public recordRequest(): void {
+    this.requestCount++;
+  }
+
+  public getCpuUsage(): number {
+    const baseCpu = 10;
+    const rpsContribution = this.rps / 60;
+    const simulatedCpu = Math.min(100, baseCpu + rpsContribution + (Math.random() * 2));
+    return Math.round(simulatedCpu);
+  }
+
+  public getMemoryPercentage(): number {
+    if (this.maxMemoryBytes === Infinity || this.maxMemoryBytes <= 0) return 0;
+    return (this.store.getMemoryUsage() / this.maxMemoryBytes) * 100;
+  }
+
   private getStatusReport() {
     return {
       nodeId: this.id,
       host: this.host,
       port: this.port,
       memoryUsage: this.store.getMemoryUsage(),
+      maxMemoryBytes: this.maxMemoryBytes,
+      memoryPercent: this.getMemoryPercentage(),
+      cpu: this.getCpuUsage(),
+      rps: this.rps,
       keysCount: this.store.keys().length,
       keys: this.store.keys(),
       status: this.gossipManager ? this.gossipManager.getLocalStatus() : 'ALIVE',
@@ -177,6 +219,14 @@ export class CacheNodeServer {
   }
 
   private setupRoutes(): void {
+    // Record request middleware for key/data endpoints
+    this.app.use((req, res, next) => {
+      if (req.path.startsWith('/keys') || req.path.startsWith('/local/keys')) {
+        this.recordRequest();
+      }
+      next();
+    });
+
     // -------------------------------------------------------------
     // LOCAL ENDPOINTS: Direct memory operations on this node only
     // -------------------------------------------------------------

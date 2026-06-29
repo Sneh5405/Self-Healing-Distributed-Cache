@@ -26,9 +26,25 @@ export class ClientProxy {
   private spawnedNodes: CacheNodeServer[] = [];
   private spawningPorts: Set<number> = new Set();
   
-  // Autoscaler state variables
-  private scaleUpThreshold = 15;
-  private scaleDownThreshold = 5;
+  // Autoscaler state variables and thresholds
+  private minNodes = 3;
+  private maxNodes = 10;
+  
+  // Cooldown tracking
+  private lastScaleUpTime = 0;
+  private lastScaleDownTime = 0;
+  private scaleUpCooldownMs = 30000;    // 30 seconds
+  private scaleDownCooldownMs = 120000; // 2 minutes
+
+  // Thresholds
+  private scaleUpCpuThreshold = 75;
+  private scaleUpMemoryThreshold = 80;
+  private scaleUpRpsThreshold = 5000;
+  
+  private scaleDownCpuThreshold = 30;
+  private scaleDownMemoryThreshold = 40;
+  private scaleDownRpsThreshold = 2000;
+
   private autoscalerInterval = 5000;
   private autoscaleTimer: NodeJS.Timeout | null = null;
   private isScalingInProgress = false;
@@ -38,12 +54,39 @@ export class ClientProxy {
     seedUrls: string[];
     replicationFactor?: number;
     maxRetries?: number;
+    minNodes?: number;
+    maxNodes?: number;
+    scaleUpThreshold?: { cpu?: number; memory?: number; rps?: number };
+    scaleDownThreshold?: { cpu?: number; memory?: number; rps?: number };
+    cooldown?: { scaleUp?: number; scaleDown?: number };
   }) {
     this.port = options.port;
     this.seedUrls = options.seedUrls;
     this.replicationFactor = options.replicationFactor || 2;
     this.maxRetries = options.maxRetries !== undefined ? options.maxRetries : 1;
     this.hashRing = new ConsistentHashRing();
+
+    // Bounds configuration
+    this.minNodes = options.minNodes !== undefined ? options.minNodes : 3;
+    this.maxNodes = options.maxNodes !== undefined ? options.maxNodes : 10;
+
+    // Thresholds configuration
+    if (options.scaleUpThreshold) {
+      if (options.scaleUpThreshold.cpu !== undefined) this.scaleUpCpuThreshold = options.scaleUpThreshold.cpu;
+      if (options.scaleUpThreshold.memory !== undefined) this.scaleUpMemoryThreshold = options.scaleUpThreshold.memory;
+      if (options.scaleUpThreshold.rps !== undefined) this.scaleUpRpsThreshold = options.scaleUpThreshold.rps;
+    }
+    if (options.scaleDownThreshold) {
+      if (options.scaleDownThreshold.cpu !== undefined) this.scaleDownCpuThreshold = options.scaleDownThreshold.cpu;
+      if (options.scaleDownThreshold.memory !== undefined) this.scaleDownMemoryThreshold = options.scaleDownThreshold.memory;
+      if (options.scaleDownThreshold.rps !== undefined) this.scaleDownRpsThreshold = options.scaleDownThreshold.rps;
+    }
+
+    // Cooldown configuration
+    if (options.cooldown) {
+      if (options.cooldown.scaleUp !== undefined) this.scaleUpCooldownMs = options.cooldown.scaleUp * 1000;
+      if (options.cooldown.scaleDown !== undefined) this.scaleDownCooldownMs = options.cooldown.scaleDown * 1000;
+    }
 
     // Add seeds initially
     for (const url of this.seedUrls) {
@@ -138,7 +181,12 @@ export class ClientProxy {
       activePorts.add(node.port);
     }
 
-    let port = 8001;
+    let startPort = 8001;
+    if (activePorts.size > 0) {
+      startPort = Math.max(...Array.from(activePorts)) + 1;
+    }
+
+    let port = startPort;
     while (activePorts.has(port)) {
       port++;
     }
@@ -210,8 +258,17 @@ export class ClientProxy {
   private async checkAutoscaling(): Promise<void> {
     if (this.isScalingInProgress) return;
 
+    const now = Date.now();
+    // Check cooldowns
+    if (now - this.lastScaleUpTime < this.scaleUpCooldownMs) {
+      return;
+    }
+    if (now - this.lastScaleDownTime < this.scaleDownCooldownMs) {
+      return;
+    }
+
     // Gather status reports from all active nodes
-    const healthyNodes: Array<{ url: string; keysCount: number; port: number }> = [];
+    const healthyNodes: Array<{ url: string; keysCount: number; port: number; cpu: number; memoryPercent: number; rps: number }> = [];
     
     const promises = Array.from(this.activeNodes).map(async (url) => {
       try {
@@ -222,7 +279,10 @@ export class ClientProxy {
             healthyNodes.push({
               url,
               keysCount: status.keysCount || 0,
-              port: status.port
+              port: status.port,
+              cpu: status.cpu !== undefined ? status.cpu : 0,
+              memoryPercent: status.memoryPercent !== undefined ? status.memoryPercent : 0,
+              rps: status.rps !== undefined ? status.rps : 0
             });
           }
         }
@@ -233,18 +293,58 @@ export class ClientProxy {
 
     await Promise.all(promises);
 
-    if (healthyNodes.length === 0) return;
+    const totalActiveNodes = healthyNodes.length;
+    if (totalActiveNodes === 0) return;
 
-    // Calculate average keys count per healthy node
+    // Calculate averages
     const totalKeys = healthyNodes.reduce((sum, n) => sum + n.keysCount, 0);
-    const avgKeys = totalKeys / healthyNodes.length;
+    const avgKeys = totalKeys / totalActiveNodes;
+    
+    const avgCpu = healthyNodes.reduce((sum, n) => sum + n.cpu, 0) / totalActiveNodes;
+    const avgMemory = healthyNodes.reduce((sum, n) => sum + n.memoryPercent, 0) / totalActiveNodes;
+    const avgRps = healthyNodes.reduce((sum, n) => sum + n.rps, 0) / totalActiveNodes;
 
-    console.log(`[Autoscaler] Monitoring load: ${totalKeys} keys across ${healthyNodes.length} nodes (Avg: ${avgKeys.toFixed(2)} keys/node)`);
+    // Check skew threshold: > 120% of average keys
+    let hasSkewedNode = false;
+    let maxSkewNodeUrl = '';
+    let maxSkewValue = 0;
+    if (totalKeys > 10) {
+      const skewThreshold = avgKeys * 1.2;
+      for (const node of healthyNodes) {
+        if (node.keysCount > skewThreshold) {
+          hasSkewedNode = true;
+          if (node.keysCount > maxSkewValue) {
+            maxSkewValue = node.keysCount;
+            maxSkewNodeUrl = node.url;
+          }
+        }
+      }
+    }
 
-    // Scale Up decision
-    if (avgKeys > this.scaleUpThreshold && this.spawnedNodes.length < 3) {
+    console.log(`[Autoscaler] Monitoring load:`);
+    console.log(`  - Nodes count: ${totalActiveNodes} (min: ${this.minNodes}, max: ${this.maxNodes})`);
+    console.log(`  - Keys count:  ${totalKeys} (Avg: ${avgKeys.toFixed(1)} keys/node)`);
+    console.log(`  - Avg CPU:     ${avgCpu.toFixed(1)}% (Threshold: ScaleUp > ${this.scaleUpCpuThreshold}%, ScaleDown < ${this.scaleDownCpuThreshold}%)`);
+    console.log(`  - Avg Memory:  ${avgMemory.toFixed(1)}% (Threshold: ScaleUp > ${this.scaleUpMemoryThreshold}%, ScaleDown < ${this.scaleDownMemoryThreshold}%)`);
+    console.log(`  - Avg RPS:     ${avgRps.toFixed(1)}/node (Threshold: ScaleUp > ${this.scaleUpRpsThreshold}, ScaleDown < ${this.scaleDownRpsThreshold})`);
+    if (totalKeys > 10) {
+      console.log(`  - Key Skew:    ${hasSkewedNode ? `YES (Max: ${maxSkewValue} keys vs threshold ${(avgKeys * 1.2).toFixed(1)} keys)` : 'NO'}`);
+    }
+
+    // Scale Up decision: CPU > 75% OR Memory > 80% OR RPS > 5000 OR KeySkew > 120% of average
+    const shouldScaleUp = avgCpu > this.scaleUpCpuThreshold || 
+                          avgMemory > this.scaleUpMemoryThreshold || 
+                          avgRps > this.scaleUpRpsThreshold || 
+                          hasSkewedNode;
+
+    if (shouldScaleUp && totalActiveNodes < this.maxNodes) {
       this.isScalingInProgress = true;
-      console.log(`[Autoscaler] LOAD EXCEEDS THRESHOLD (${avgKeys.toFixed(2)} > ${this.scaleUpThreshold}). Scaling up...`);
+      console.log(`[Autoscaler] SCALE UP TRIGGERED:`);
+      if (avgCpu > this.scaleUpCpuThreshold) console.log(`  - CPU exceeded: ${avgCpu.toFixed(1)}% > ${this.scaleUpCpuThreshold}%`);
+      if (avgMemory > this.scaleUpMemoryThreshold) console.log(`  - Memory exceeded: ${avgMemory.toFixed(1)}% > ${this.scaleUpMemoryThreshold}%`);
+      if (avgRps > this.scaleUpRpsThreshold) console.log(`  - RPS exceeded: ${avgRps.toFixed(1)} > ${this.scaleUpRpsThreshold}`);
+      if (hasSkewedNode) console.log(`  - Key skew detected: Node ${maxSkewNodeUrl} has ${maxSkewValue} keys (threshold: ${(avgKeys * 1.2).toFixed(1)})`);
+
       try {
         const nextPort = this.getNextAvailablePort();
         this.spawningPorts.add(nextPort);
@@ -263,6 +363,7 @@ export class ClientProxy {
         
         this.spawnedNodes.push(node);
         this.spawningPorts.delete(nextPort);
+        this.lastScaleUpTime = Date.now();
         console.log(`[Autoscaler] Scale-up Success: Node spawned on Port ${nextPort} and joined cluster.`);
       } catch (err: any) {
         console.error(`[Autoscaler] Scale-up Failed:`, err.message);
@@ -270,28 +371,36 @@ export class ClientProxy {
         this.isScalingInProgress = false;
       }
     }
-    // Scale Down decision
-    else if (avgKeys < this.scaleDownThreshold && this.spawnedNodes.length > 0) {
-      this.isScalingInProgress = true;
-      const lastNode = this.spawnedNodes[this.spawnedNodes.length - 1];
-      console.log(`[Autoscaler] LOAD BELOW THRESHOLD (${avgKeys.toFixed(2)} < ${this.scaleDownThreshold}). Scaling down node on port ${lastNode.port}...`);
-      try {
-        const targetUrl = `http://${lastNode.host}:${lastNode.port}`;
-        
-        // Remove from proxy activeNodes and hashRing immediately so no new traffic is routed to it
-        this.activeNodes.delete(targetUrl);
-        this.hashRing.removeNode(targetUrl);
-        
-        // Call graceful /leave on the node itself to migrate its keys
-        await fetch(`${targetUrl}/leave`, { method: 'POST', signal: AbortSignal.timeout(3000) }).catch(() => {});
-        
-        // Remove from spawned list
-        this.spawnedNodes.pop();
-        console.log(`[Autoscaler] Scale-down Success: Node on Port ${lastNode.port} gracefully left and was shut down.`);
-      } catch (err: any) {
-        console.error(`[Autoscaler] Scale-down Failed:`, err.message);
-      } finally {
-        this.isScalingInProgress = false;
+    // Scale Down decision: CPU < 30% AND Memory < 40% AND RPS < 2000 AND no KeySkew
+    else {
+      const shouldScaleDown = avgCpu < this.scaleDownCpuThreshold && 
+                            avgMemory < this.scaleDownMemoryThreshold && 
+                            avgRps < this.scaleDownRpsThreshold && 
+                            !hasSkewedNode;
+
+      if (shouldScaleDown && totalActiveNodes > this.minNodes && this.spawnedNodes.length > 0) {
+        this.isScalingInProgress = true;
+        const lastNode = this.spawnedNodes[this.spawnedNodes.length - 1];
+        console.log(`[Autoscaler] SCALE DOWN TRIGGERED: CPU ${avgCpu.toFixed(1)}%, Mem ${avgMemory.toFixed(1)}%, RPS ${avgRps.toFixed(1)}/node. Removing node on port ${lastNode.port}...`);
+        try {
+          const targetUrl = `http://${lastNode.host}:${lastNode.port}`;
+          
+          // Remove from proxy activeNodes and hashRing immediately so no new traffic is routed to it
+          this.activeNodes.delete(targetUrl);
+          this.hashRing.removeNode(targetUrl);
+          
+          // Call graceful /leave on the node itself to migrate its keys
+          await fetch(`${targetUrl}/leave`, { method: 'POST', signal: AbortSignal.timeout(3000) }).catch(() => {});
+          
+          // Remove from spawned list
+          this.spawnedNodes.pop();
+          this.lastScaleDownTime = Date.now();
+          console.log(`[Autoscaler] Scale-down Success: Node on Port ${lastNode.port} gracefully left and was shut down.`);
+        } catch (err: any) {
+          console.error(`[Autoscaler] Scale-down Failed:`, err.message);
+        } finally {
+          this.isScalingInProgress = false;
+        }
       }
     }
   }

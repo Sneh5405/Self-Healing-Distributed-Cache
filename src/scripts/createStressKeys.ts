@@ -1,3 +1,5 @@
+export {};
+
 const PROXY_URL = 'http://localhost:8000';
 const NUM_KEYS = 2000;
 const TTL_SECONDS = 300; // 5 minutes
