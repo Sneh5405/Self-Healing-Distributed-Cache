@@ -101,6 +101,14 @@ export class GossipManager {
     }
   }
 
+  private statusOverrides(remoteStatus: string, localStatus: string): boolean {
+    if (remoteStatus === localStatus) return false;
+    if (remoteStatus === 'DEAD') return true;
+    if (remoteStatus === 'LEAVING' && localStatus !== 'DEAD') return true;
+    if (remoteStatus === 'SUSPECT' && localStatus === 'ALIVE') return true;
+    return false;
+  }
+
   /**
    * Merges incoming gossip membership list with our local view.
    * Returns our updated local view to send back (bi-directional gossip).
@@ -146,8 +154,9 @@ export class GossipManager {
       } else {
         // Node is known, compare heartbeats
         const isHeartbeatHigher = remote.heartbeat > local.heartbeat;
+        const isStatusOverride = remote.heartbeat === local.heartbeat && this.statusOverrides(remote.status, local.status);
         
-        if (isHeartbeatHigher) {
+        if (isHeartbeatHigher || isStatusOverride) {
           // Update details
           const oldStatus = local.status;
           local.heartbeat = remote.heartbeat;

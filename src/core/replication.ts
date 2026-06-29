@@ -29,29 +29,36 @@ export class ReplicationManager {
       throw new Error('Hash ring is not initialized');
     }
 
-    // Identify target physical nodes from the ring
-    const targets = ring.getNodesForKey(key, this.N);
-    if (targets.length === 0) {
+    // Identify ideal target nodes and fallback nodes
+    const idealTargets = ring.getNodesForKey(key, this.N);
+    if (idealTargets.length === 0) {
       throw new Error('No target nodes found in hash ring');
     }
 
-    // Determine required number of successful writes
+    const allPhysicalNodes = ring.getPhysicalNodes();
+    const allTargets = ring.getNodesForKey(key, allPhysicalNodes.length);
+
+    // Determine required number of successful writes based on the ideal targets length
     let requiredAcks = 1;
     if (consistency === 'QUORUM') {
-      requiredAcks = Math.floor(targets.length / 2) + 1;
+      requiredAcks = Math.floor(idealTargets.length / 2) + 1;
     } else if (consistency === 'ALL') {
-      requiredAcks = targets.length;
+      requiredAcks = idealTargets.length;
     }
 
-    const promises = targets.map(async (nodeUrl) => {
+    const successfulNodes: string[] = [];
+    const triedNodes = new Set<string>();
+
+    const attemptWrite = async (nodeUrl: string): Promise<boolean> => {
+      triedNodes.add(nodeUrl);
       const isLocal = nodeUrl === `http://${this.server.host}:${this.server.port}`;
       
       if (isLocal) {
         try {
           this.server.store.set(key, value, ttlSeconds, writeTimestamp);
-          return { nodeUrl, success: true };
+          return true;
         } catch (err) {
-          return { nodeUrl, success: false };
+          return false;
         }
       }
 
@@ -63,14 +70,36 @@ export class ReplicationManager {
           body: JSON.stringify({ value, ttlSeconds, timestamp: writeTimestamp }),
           signal: AbortSignal.timeout(1000)
         });
-        return { nodeUrl, success: response.ok };
+        return response.ok;
       } catch (err) {
-        return { nodeUrl, success: false };
+        return false;
       }
-    });
+    };
 
-    const results = await Promise.all(promises);
-    const successfulNodes = results.filter((r) => r.success).map((r) => r.nodeUrl);
+    // Try ideal targets first concurrently
+    const idealPromises = idealTargets.map(async (nodeUrl) => {
+      const ok = await attemptWrite(nodeUrl);
+      return { nodeUrl, ok };
+    });
+    const idealResults = await Promise.all(idealPromises);
+    for (const r of idealResults) {
+      if (r.ok) {
+        successfulNodes.push(r.nodeUrl);
+      }
+    }
+
+    // If we don't have N successful writes yet, try fallback nodes clockwise sequentially
+    if (successfulNodes.length < this.N) {
+      for (const nodeUrl of allTargets) {
+        if (successfulNodes.length >= this.N) break;
+        if (triedNodes.has(nodeUrl)) continue;
+
+        const ok = await attemptWrite(nodeUrl);
+        if (ok) {
+          successfulNodes.push(nodeUrl);
+        }
+      }
+    }
 
     if (successfulNodes.length < requiredAcks) {
       throw {
@@ -95,50 +124,27 @@ export class ReplicationManager {
       throw new Error('Hash ring is not initialized');
     }
 
-    const targets = ring.getNodesForKey(key, this.N);
-    if (targets.length === 0) {
+    const idealTargets = ring.getNodesForKey(key, this.N);
+    if (idealTargets.length === 0) {
       throw new Error('No target nodes found in hash ring');
     }
+
+    const allPhysicalNodes = ring.getPhysicalNodes();
+    const allTargets = ring.getNodesForKey(key, allPhysicalNodes.length);
 
     // Determine consistency requirement
     let requiredReads = 1;
     if (consistency === 'QUORUM') {
-      requiredReads = Math.floor(targets.length / 2) + 1;
+      requiredReads = Math.floor(idealTargets.length / 2) + 1;
     } else if (consistency === 'ALL') {
-      requiredReads = targets.length;
+      requiredReads = idealTargets.length;
     }
 
-    // If consistency is ONE, we can optimize by trying replicas sequentially (Failover Routing)
-    if (consistency === 'ONE') {
-      for (const nodeUrl of targets) {
-        const isLocal = nodeUrl === `http://${this.server.host}:${this.server.port}`;
-        
-        try {
-          if (isLocal) {
-            const entry = this.server.store.get(key);
-            if (entry) {
-              return { key, value: entry.value, timestamp: entry.timestamp };
-            }
-          } else {
-            const response = await fetch(`${nodeUrl}/local/keys/${key}`, {
-              signal: AbortSignal.timeout(1000)
-            });
-            if (response.ok) {
-              const entry = await response.json() as CacheEntry;
-              return { key, value: entry.value, timestamp: entry.timestamp };
-            }
-          }
-        } catch (err) {
-          // Attempt failover to next node in the list
-          console.warn(`[Node ${this.server.id}] Failover: failed to read from ${nodeUrl}, trying next replica...`);
-        }
-      }
-      
-      throw { status: 404, message: `Key "${key}" not found on any replica` };
-    }
+    const successfulResponses: Array<{ nodeUrl: string, entry: CacheEntry | null, success: boolean }> = [];
+    const triedNodes = new Set<string>();
 
-    // For QUORUM or ALL: Query multiple replicas concurrently
-    const readPromises = targets.map(async (nodeUrl) => {
+    const attemptRead = async (nodeUrl: string) => {
+      triedNodes.add(nodeUrl);
       const isLocal = nodeUrl === `http://${this.server.host}:${this.server.port}`;
       try {
         if (isLocal) {
@@ -158,10 +164,40 @@ export class ReplicationManager {
         }
       } catch (err) {}
       return { nodeUrl, entry: null, success: false };
-    });
+    };
 
-    const readResults = await Promise.all(readPromises);
-    const successfulResponses = readResults.filter((r) => r.success);
+    // If consistency is ONE, we can optimize by trying replicas sequentially (Failover Routing)
+    if (consistency === 'ONE') {
+      for (const nodeUrl of allTargets) {
+        const res = await attemptRead(nodeUrl);
+        if (res.success && res.entry) {
+          return { key, value: res.entry.value, timestamp: res.entry.timestamp };
+        }
+      }
+      throw { status: 404, message: `Key "${key}" not found on any replica` };
+    }
+
+    // For QUORUM or ALL: Query multiple replicas concurrently (starting with ideal ones)
+    const idealPromises = idealTargets.map(nodeUrl => attemptRead(nodeUrl));
+    const idealResults = await Promise.all(idealPromises);
+    for (const r of idealResults) {
+      if (r.success) {
+        successfulResponses.push(r);
+      }
+    }
+
+    // Fallback if we don't have N responses yet, try other nodes clockwise
+    if (successfulResponses.length < this.N) {
+      for (const nodeUrl of allTargets) {
+        if (successfulResponses.length >= this.N) break;
+        if (triedNodes.has(nodeUrl)) continue;
+
+        const res = await attemptRead(nodeUrl);
+        if (res.success) {
+          successfulResponses.push(res);
+        }
+      }
+    }
 
     if (successfulResponses.length < requiredReads) {
       throw {
@@ -236,8 +272,10 @@ export class ReplicationManager {
       throw new Error('Hash ring is not initialized');
     }
 
-    const targets = ring.getNodesForKey(key, this.N);
-    const promises = targets.map(async (nodeUrl) => {
+    const allPhysicalNodes = ring.getPhysicalNodes();
+    const allTargets = ring.getNodesForKey(key, allPhysicalNodes.length);
+
+    const promises = allTargets.map(async (nodeUrl) => {
       const isLocal = nodeUrl === `http://${this.server.host}:${this.server.port}`;
       
       if (isLocal) {

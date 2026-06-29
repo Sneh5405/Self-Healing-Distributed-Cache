@@ -349,6 +349,7 @@ export class CacheNodeServer {
       
       if (maxMemoryBytes !== undefined) {
         this.store.setMaxMemory(maxMemoryBytes);
+        this.maxMemoryBytes = maxMemoryBytes; // Sync server property
       }
       if (evictionPolicy !== undefined) {
         if (evictionPolicy === 'LRU' || evictionPolicy === 'LFU' || evictionPolicy === 'NONE') {
@@ -360,7 +361,7 @@ export class CacheNodeServer {
       
       res.json({
         success: true,
-        maxMemoryBytes: this.store.getMemoryUsage(), // return current status
+        maxMemoryBytes: this.maxMemoryBytes, // return the actual limit
         evictionPolicy
       });
     });
