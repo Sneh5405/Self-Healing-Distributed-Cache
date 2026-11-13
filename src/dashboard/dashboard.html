@@ -539,12 +539,25 @@
           }
         }
 
-        // Connect to active nodes
+        // Connect to active nodes + populate nodesState directly from HTTP (works on cloud/single-port)
         const reportedNodeIds = new Set();
         for (const [nodeUrl, nodeInfo] of Object.entries(nodes)) {
           if (nodeInfo.status !== 'OFFLINE' && nodeInfo.status !== 'ERROR') {
             const nodeId = nodeInfo.nodeId;
             reportedNodeIds.add(nodeId);
+
+            // ✅ Always populate from HTTP so nodes show up even when WS is blocked (cloud/single-port)
+            nodesState[nodeId] = {
+              id: nodeId,
+              host: nodeInfo.host,
+              port: nodeInfo.port,
+              status: nodeInfo.status || 'ALIVE',
+              memoryUsage: nodeInfo.memoryUsage || 0,
+              keysCount: nodeInfo.keysCount || 0,
+              keys: nodeInfo.keys || []
+            };
+
+            // Also attempt direct WS (works locally; silently fails on cloud — that's OK)
             connectToNodeWS(nodeId, nodeInfo.host, nodeInfo.port);
           } else {
             // Node is offline, reflect in state
@@ -829,16 +842,26 @@
           try {
             // Alternating writes and reads
             if (counter % 2 === 0) {
-              await fetch(`${PROXY_URL}/keys/${randomKey}?consistency=QUORUM`, {
+              const res = await fetch(`${PROXY_URL}/keys/${randomKey}?consistency=QUORUM`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ value: randomVal, ttlSeconds: 30 })
               });
+              if (res.ok) {
+                if (counter % 6 === 0) {
+                  log('SET', `[Chaos Stress] POST "${randomKey}" = "${randomVal}" (QUORUM 200 OK)`);
+                }
+              } else {
+                log('DELETE', `[Chaos Stress] POST failed: ${res.status}`);
+              }
             } else {
-              await fetch(`${PROXY_URL}/keys/${randomKey}?consistency=ONE`);
+              const res = await fetch(`${PROXY_URL}/keys/${randomKey}?consistency=ONE`);
+              if (res.ok && counter % 6 === 1) {
+                log('GET', `[Chaos Stress] GET "${randomKey}" (ONE 200 OK)`);
+              }
             }
           } catch (err) {
-            // Ignore proxy fetch errors during kills
+            log('DELETE', `[Chaos Stress] Error reaching cluster: ${err.message}`);
           }
         }, 150);
       }
