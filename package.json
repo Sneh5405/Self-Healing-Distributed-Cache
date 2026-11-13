@@ -4,7 +4,7 @@
   "description": "A self-healing distributed cache cluster built with TypeScript and Node.js.",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs=require('fs'); fs.mkdirSync('dist/dashboard', {recursive:true}); fs.copyFileSync('src/dashboard/dashboard.html', 'dist/dashboard/dashboard.html');\"",
     "start": "node dist/scripts/startCluster.js",
     "dev": "ts-node src/scripts/startCluster.ts",
     "cluster:start": "ts-node src/scripts/startCluster.ts",

@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import * as http from 'http';
 import * as path from 'path';
+import * as fs from 'fs';
 import { WebSocket, WebSocketServer } from 'ws';
 import { ConsistentHashRing } from '../core/hashRing';
 import { CacheNodeServer } from './server';
@@ -507,7 +508,18 @@ export class ClientProxy {
 
     // Serve Static Dashboard
     this.app.get('/dashboard', (req: Request, res: Response) => {
-      res.sendFile(path.join(__dirname, '../dashboard/dashboard.html'));
+      const candidates = [
+        path.join(process.cwd(), 'src/dashboard/dashboard.html'),
+        path.join(process.cwd(), 'dist/dashboard/dashboard.html'),
+        path.join(__dirname, '../dashboard/dashboard.html'),
+        path.join(__dirname, '../../src/dashboard/dashboard.html'),
+      ];
+      for (const p of candidates) {
+        if (fs.existsSync(p)) {
+          return res.sendFile(p);
+        }
+      }
+      res.status(500).send('Error: dashboard.html could not be located on the server.');
     });
 
     // Proxy GET key
