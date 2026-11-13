@@ -1002,6 +1002,13 @@
     fetchClusterTopology();
     setInterval(fetchClusterTopology, 2000);
     setInterval(updateStressBadge, 2000);
+
+    // Keep-Alive: Ping proxy every 1 minute to keep cloud instance awake
+    setInterval(async () => {
+      try {
+        await fetch(`${PROXY_URL}/ping`);
+      } catch (e) {}
+    }, 60000);
   </script>
 </body>
 </html>

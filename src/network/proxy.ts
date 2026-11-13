@@ -57,6 +57,9 @@ export class ClientProxy {
   private isSeeding = false;
   private isSimulating = false;
 
+  // Anti-sleep keep-alive timer
+  private keepAliveTimer: NodeJS.Timeout | null = null;
+
   constructor(options: {
     port: number;
     seedUrls: string[];
@@ -120,6 +123,9 @@ export class ClientProxy {
     // Start background autoscaling monitor
     this.autoscaleTimer = setInterval(() => this.checkAutoscaling(), this.autoscalerInterval);
 
+    // Start background Keep-Alive runner to prevent Render free-tier sleep
+    this.startKeepAlive();
+
     return new Promise((resolve) => {
       this.server = this.app.listen(this.port, '0.0.0.0', () => {
         console.log(`[Proxy Gateway] Listening on http://0.0.0.0:${this.port}`);
@@ -164,6 +170,11 @@ export class ClientProxy {
       clearInterval(this.autoscaleTimer);
       this.autoscaleTimer = null;
     }
+
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
     
     // Stop all dynamically spawned nodes
     for (const node of this.spawnedNodes) {
@@ -184,6 +195,38 @@ export class ClientProxy {
         resolve();
       }
     });
+  }
+
+  /**
+   * Background Keep-Alive worker to prevent cloud hosts (like Render free tier)
+   * from putting the instance into sleep after 15 minutes of inactivity.
+   * Pings the service's public external URL every 1 minute.
+   */
+  private startKeepAlive(): void {
+    const keepAliveMinutes = 1;
+    const intervalMs = keepAliveMinutes * 60 * 1000;
+
+    // Detect Render URL or custom host
+    const externalUrl = process.env.RENDER_EXTERNAL_URL ||
+                        (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '') ||
+                        process.env.SELF_URL ||
+                        process.env.APP_URL ||
+                        `http://localhost:${this.port}`;
+
+    console.log(`[Keep-Alive Service] Armed. Pinging ${externalUrl}/ping every ${keepAliveMinutes} min to prevent sleeping.`);
+
+    this.keepAliveTimer = setInterval(async () => {
+      try {
+        const pingTarget = `${externalUrl}/ping`;
+        const res = await fetch(pingTarget, { signal: AbortSignal.timeout(6000) });
+        if (res.ok) {
+          const body: any = await res.json();
+          console.log(`[Keep-Alive] Self-ping OK (uptime: ${body.uptime}s) at ${new Date().toLocaleTimeString()}`);
+        }
+      } catch (err: any) {
+        console.warn(`[Keep-Alive] Notice during self-ping: ${err.message}`);
+      }
+    }, intervalMs);
   }
 
   private getPortFromUrl(url: string): number | null {
@@ -504,6 +547,25 @@ export class ClientProxy {
     // Root URL redirect to Dashboard
     this.app.get('/', (req: Request, res: Response) => {
       res.redirect('/dashboard');
+    });
+
+    // Keep-Alive & Health Check Endpoints (Prevents Render Free-Tier from Sleeping)
+    this.app.get('/ping', (req: Request, res: Response) => {
+      res.status(200).json({
+        status: 'ok',
+        uptime: Math.floor(process.uptime()),
+        timestamp: new Date().toISOString(),
+        activeNodes: this.activeNodes.size,
+        message: 'Keep-alive ping acknowledged. Service is active and operational.'
+      });
+    });
+
+    this.app.get('/healthz', (req: Request, res: Response) => {
+      res.status(200).json({
+        status: 'healthy',
+        uptime: Math.floor(process.uptime()),
+        timestamp: new Date().toISOString()
+      });
     });
 
     // Serve Static Dashboard
