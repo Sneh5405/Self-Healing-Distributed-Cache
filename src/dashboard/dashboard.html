@@ -356,12 +356,30 @@
             </div>
           </div>
           
-          <div style="margin-top: 24px;">
-            <div class="card-title">Cluster Controls</div>
-            <div class="controls">
-              <button id="btn-add-node">➕ Add Node</button>
-              <button id="btn-kill-node" class="btn-danger">❌ Kill Node</button>
-              <button id="btn-leave-node">🚪 Leave Node</button>
+          <div style="margin-top: 18px;">
+            <div class="card-title" style="font-size: 14px; margin-bottom: 8px;">Cluster Controls</div>
+            <div class="controls" style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button id="btn-add-node" style="flex: 1; padding: 8px 10px; font-size: 12px;">➕ Add Node</button>
+              <button id="btn-kill-node" class="btn-danger" style="flex: 1; padding: 8px 10px; font-size: 12px;">❌ Kill Node</button>
+              <button id="btn-leave-node" style="flex: 1; padding: 8px 10px; font-size: 12px; background-color: #334155;">🚪 Leave Node</button>
+            </div>
+          </div>
+
+          <div style="margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);">
+            <div class="card-title" style="font-size: 14px; margin-bottom: 8px; color: #38bdf8;">
+              <span>⚡ Live Stress & Autoscaling</span>
+              <span id="stress-badge" style="font-size: 10px; padding: 2px 8px; border-radius: 999px; background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3);">IDLE</span>
+            </div>
+            <div class="controls" style="display: flex; gap: 8px; flex-wrap: wrap;">
+              <button id="btn-seed-stress" style="flex: 1; min-width: 130px; background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%); font-size: 12px; padding: 9px 10px;">
+                🚀 Seed 2,000 Keys
+              </button>
+              <button id="btn-spike-traffic" style="flex: 1; min-width: 130px; background: linear-gradient(135deg, #7c3aed 0%, #9333ea 100%); font-size: 12px; padding: 9px 10px;">
+                📈 Spike Traffic (Scale-Up)
+              </button>
+              <button id="btn-stop-stress" style="width: 100%; background: #475569; font-size: 11px; padding: 6px 8px;">
+                ⏹️ Stop Stress Operations
+              </button>
             </div>
           </div>
         </div>
@@ -390,7 +408,7 @@
 
   <script>
     // Configuration & State
-    const PROXY_URL = 'http://localhost:8000';
+    const PROXY_URL = window.location.origin;
     let nodesState = {};
     let activeKeys = [];
     let logBuffer = [];
@@ -424,7 +442,9 @@
     // Connect to Node WebSocket Telemetry
     let wsConnections = {};
     function connectToNodeWS(nodeId, host, port) {
-      const wsUrl = `ws://${host}:${port}`;
+      const wsHost = (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0') ? window.location.hostname : host;
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsProtocol}//${wsHost}:${port}`;
       if (wsConnections[nodeId]) return;
 
       try {
@@ -466,20 +486,37 @@
         };
 
         ws.onerror = () => {
-          if (nodesState[nodeId]) {
-            nodesState[nodeId].status = 'DEAD';
-            updateNodesGrid();
-            drawRing();
-          }
+          // Do not mark node dead here; fetchClusterTopology() handles official cluster gossip status
         };
 
         ws.onclose = () => {
           delete wsConnections[nodeId];
         };
       } catch (err) {
-        console.error('WS Connection error:', err);
+        // Direct WS not available (e.g. single-port cloud host); handled by HTTP polling & proxy WS
       }
     }
+
+    // Connect to Unified Proxy WebSocket for Cloud Hosting
+    function connectProxyWS() {
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+      try {
+        const ws = new WebSocket(wsUrl);
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'log') {
+              log(data.level || 'INFO', data.message);
+            }
+          } catch (e) {}
+        };
+        ws.onclose = () => {
+          setTimeout(connectProxyWS, 4000);
+        };
+      } catch (err) {}
+    }
+    connectProxyWS();
 
     // Refresh cluster topology from proxy
     async function fetchClusterTopology() {
@@ -833,13 +870,8 @@
       log('INFO', `Simulating hard crash: killing node on Port ${target.port}...`);
       
       try {
-        // Send kill command to the node directly via a shutdown hook or exit command
-        // In our dashboard, we will call local delete or status to simulate crash, 
-        // or trigger dynamic stop on the target. We'll send POST to /leave but without migrating (simulating kill)
-        // or let the node's process die.
-        // For a true kill, we can make the server exit. Let's send a call to node's process or trigger it.
-        // For safety, let's trigger a POST to /leave with a crash parameter
-        fetch(`http://${target.host}:${target.port}/leave?crash=true`, { method: 'POST' }).catch(() => {});
+        const targetHost = (target.host === 'localhost' || target.host === '127.0.0.1' || target.host === '0.0.0.0') ? window.location.hostname : target.host;
+        fetch(`http://${targetHost}:${target.port}/leave?crash=true`, { method: 'POST' }).catch(() => {});
         log('DELETE', `Node on Port ${target.port} was KILLED. Watch the failure detector react!`);
       } catch {
         // Ignore
@@ -854,16 +886,99 @@
       log('INFO', `Simulating graceful leave: triggering leave protocol on Port ${target.port}...`);
       
       try {
-        await fetch(`http://${target.host}:${target.port}/leave`, { method: 'POST' });
+        const targetHost = (target.host === 'localhost' || target.host === '127.0.0.1' || target.host === '0.0.0.0') ? window.location.hostname : target.host;
+        await fetch(`http://${targetHost}:${target.port}/leave`, { method: 'POST' });
         log('INFO', `Graceful leave initiated for Port ${target.port}. keys are migrating...`);
       } catch {
         // Ignore
       }
     };
 
+    // Live Stress Seeder (Seed 2,000 Keys)
+    const seedStressBtn = document.getElementById('btn-seed-stress');
+    if (seedStressBtn) {
+      seedStressBtn.onclick = async () => {
+        log('INFO', '🚀 Triggering Stress Seeder: Writing 2,000 keys with QUORUM consistency...');
+        try {
+          const resp = await fetch(`${PROXY_URL}/api/stress/seed`, { method: 'POST' });
+          const data = await resp.json();
+          if (resp.ok) {
+            log('SET', '⚡ Stress Seeder started! Watch the hash ring and node cards as keys fill up.');
+          } else {
+            log('DELETE', `Stress Seeder error: ${data.error}`);
+          }
+        } catch (err) {
+          log('DELETE', 'Failed to connect to proxy to start stress seeder.');
+        }
+      };
+    }
+
+    // Live Traffic Spike (Trigger Autoscaling)
+    const spikeTrafficBtn = document.getElementById('btn-spike-traffic');
+    if (spikeTrafficBtn) {
+      spikeTrafficBtn.onclick = async () => {
+        log('INFO', '📈 Triggering High-Concurrency Traffic Spike (60 workers, 25 seconds)...');
+        try {
+          const resp = await fetch(`${PROXY_URL}/api/stress/simulate`, { method: 'POST' });
+          const data = await resp.json();
+          if (resp.ok) {
+            log('SET', '🚀 Traffic spike active! Watch the autoscaler spawn a new node on port 8004.');
+          } else {
+            log('DELETE', `Traffic spike error: ${data.error}`);
+          }
+        } catch (err) {
+          log('DELETE', 'Failed to connect to proxy to start traffic spike.');
+        }
+      };
+    }
+
+    // Stop Stress Operations
+    const stopStressBtn = document.getElementById('btn-stop-stress');
+    if (stopStressBtn) {
+      stopStressBtn.onclick = async () => {
+        try {
+          const resp = await fetch(`${PROXY_URL}/api/stress/stop`, { method: 'POST' });
+          const data = await resp.json();
+          log('INFO', '⏹️ Stress operations stopped.');
+        } catch (err) {
+          log('DELETE', 'Failed to send stop command.');
+        }
+      };
+    }
+
+    // Poll stress test status for badge
+    async function updateStressBadge() {
+      try {
+        const resp = await fetch(`${PROXY_URL}/api/stress/status`);
+        if (resp.ok) {
+          const data = await resp.json();
+          const badge = document.getElementById('stress-badge');
+          if (badge) {
+            if (data.isSeeding) {
+              badge.textContent = 'SEEDING 2K KEYS';
+              badge.style.color = '#38bdf8';
+              badge.style.borderColor = '#38bdf8';
+              badge.style.background = 'rgba(56, 189, 248, 0.2)';
+            } else if (data.isSimulating) {
+              badge.textContent = 'TRAFFIC SPIKE ACTIVE';
+              badge.style.color = '#a855f7';
+              badge.style.borderColor = '#a855f7';
+              badge.style.background = 'rgba(168, 85, 247, 0.2)';
+            } else {
+              badge.textContent = 'IDLE';
+              badge.style.color = '#94a3b8';
+              badge.style.borderColor = 'rgba(148, 163, 184, 0.3)';
+              badge.style.background = 'rgba(148, 163, 184, 0.1)';
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
     // Bootstrap
     fetchClusterTopology();
     setInterval(fetchClusterTopology, 2000);
+    setInterval(updateStressBadge, 2000);
   </script>
 </body>
 </html>

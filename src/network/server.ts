@@ -108,8 +108,8 @@ export class CacheNodeServer {
    */
   public start(): Promise<void> {
     return new Promise((resolve) => {
-      this.httpServer.listen(this.port, this.host, () => {
-        console.log(`[Node ${this.id}] Server started on http://${this.host}:${this.port}`);
+      this.httpServer.listen(this.port, '0.0.0.0', () => {
+        console.log(`[Node ${this.id}] Server started on port ${this.port} (0.0.0.0)`);
         resolve();
       });
     });

@@ -34,6 +34,8 @@ lerna-debug.log*
 # OS metadata
 .DS_Store
 Thumbs.db
+~$*
+
 
 # Project planning and commit history guides
 implementation_plan.md

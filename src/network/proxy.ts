@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import * as http from 'http';
 import * as path from 'path';
+import { WebSocket, WebSocketServer } from 'ws';
 import { ConsistentHashRing } from '../core/hashRing';
 import { CacheNodeServer } from './server';
 
@@ -25,6 +26,8 @@ export class ClientProxy {
   private syncInterval: NodeJS.Timeout | null = null;
   private spawnedNodes: CacheNodeServer[] = [];
   private spawningPorts: Set<number> = new Set();
+  private wss: WebSocketServer | null = null;
+  private wsClients: Set<WebSocket> = new Set();
   
   // Autoscaler state variables and thresholds
   private minNodes = 3;
@@ -48,6 +51,10 @@ export class ClientProxy {
   private autoscalerInterval = 5000;
   private autoscaleTimer: NodeJS.Timeout | null = null;
   private isScalingInProgress = false;
+
+  // Stress testing state
+  private isSeeding = false;
+  private isSimulating = false;
 
   constructor(options: {
     port: number;
@@ -113,12 +120,35 @@ export class ClientProxy {
     this.autoscaleTimer = setInterval(() => this.checkAutoscaling(), this.autoscalerInterval);
 
     return new Promise((resolve) => {
-      this.server = this.app.listen(this.port, () => {
-        console.log(`[Proxy Gateway] Listening on http://localhost:${this.port}`);
+      this.server = this.app.listen(this.port, '0.0.0.0', () => {
+        console.log(`[Proxy Gateway] Listening on http://0.0.0.0:${this.port}`);
         console.log(`[Proxy Gateway] Routing keys with replication factor ${this.replicationFactor} and max retries ${this.maxRetries}`);
+        
+        // Attach unified WebSocket Server to proxy HTTP server
+        if (this.server) {
+          this.wss = new WebSocketServer({ server: this.server, path: '/ws' });
+          this.wss.on('connection', (ws) => {
+            this.wsClients.add(ws);
+            ws.on('close', () => this.wsClients.delete(ws));
+            ws.send(JSON.stringify({ type: 'init', message: 'Connected to Proxy Gateway WebSocket' }));
+          });
+        }
+        
         resolve();
       });
     });
+  }
+
+  /**
+   * Broadcast message to all connected WebSocket clients on the proxy.
+   */
+  public broadcast(message: any): void {
+    const data = JSON.stringify(message);
+    for (const client of this.wsClients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(data);
+      }
+    }
   }
 
   /**
@@ -470,6 +500,11 @@ export class ClientProxy {
   }
 
   private setupRoutes(): void {
+    // Root URL redirect to Dashboard
+    this.app.get('/', (req: Request, res: Response) => {
+      res.redirect('/dashboard');
+    });
+
     // Serve Static Dashboard
     this.app.get('/dashboard', (req: Request, res: Response) => {
       res.sendFile(path.join(__dirname, '../dashboard/dashboard.html'));
@@ -577,6 +612,103 @@ export class ClientProxy {
         console.error(`[Proxy Gateway] Failed to scale up node:`, err);
         res.status(500).json({ error: `Failed to spawn node: ${err.message}` });
       }
+    });
+
+    // API to start 2,000 Key Stress Seeder from dashboard
+    this.app.post('/api/stress/seed', async (req: Request, res: Response) => {
+      if (this.isSeeding) {
+        return res.status(409).json({ error: 'Stress key seeding is already in progress!' });
+      }
+      this.isSeeding = true;
+      res.json({ success: true, message: 'Seeding 2,000 keys initiated in background.' });
+
+      (async () => {
+        const totalKeys = 2000;
+        console.log(`[Dashboard Seeder API] Starting background seed of ${totalKeys} keys...`);
+        let count = 0;
+        try {
+          for (let i = 1; i <= totalKeys && this.isSeeding; i++) {
+            const key = `stress_key_${i}`;
+            try {
+              await this.forwardRequest(
+                key,
+                'POST',
+                `/keys/${key}`,
+                {
+                  value: `stress_val_${key}_${Math.random().toString(36).substring(2, 8)}`,
+                  ttlSeconds: 300
+                },
+                'QUORUM'
+              );
+              count++;
+            } catch (err) {}
+
+            if (i % 100 === 0) {
+              console.log(`[Dashboard Seeder API] Progress: ${i}/${totalKeys} keys written (${((i / totalKeys) * 100).toFixed(0)}%)`);
+            }
+          }
+          console.log(`[Dashboard Seeder API] Seeding finished. Total keys written: ${count}`);
+        } finally {
+          this.isSeeding = false;
+        }
+      })();
+    });
+
+    // API to simulate high-concurrency traffic spike for autoscaling
+    this.app.post('/api/stress/simulate', (req: Request, res: Response) => {
+      if (this.isSimulating) {
+        return res.status(409).json({ error: 'Traffic spike simulation is already running!' });
+      }
+      this.isSimulating = true;
+      res.json({ success: true, message: 'Autoscaling traffic spike simulation started for 25s.' });
+
+      (async () => {
+        const durationMs = 25000;
+        const startTime = Date.now();
+        const concurrency = 60;
+        console.log(`[Dashboard Spike API] Starting traffic spike with ${concurrency} parallel workers...`);
+
+        const worker = async () => {
+          while (this.isSimulating && Date.now() - startTime < durationMs) {
+            const keyId = Math.floor(Math.random() * 1000);
+            const key = `stress_key_${keyId}`;
+            const isWrite = Math.random() > 0.8;
+            try {
+              if (isWrite) {
+                await this.forwardRequest(key, 'POST', `/keys/${key}`, {
+                  value: `spike_${Math.random().toString(36).substring(2, 6)}`,
+                  ttlSeconds: 300
+                }, 'ONE');
+              } else {
+                await this.forwardRequest(key, 'GET', `/keys/${key}`, undefined, 'ONE');
+              }
+            } catch (e) {}
+          }
+        };
+
+        try {
+          await Promise.all(Array.from({ length: concurrency }, () => worker()));
+          console.log('[Dashboard Spike API] Traffic spike simulation completed.');
+        } finally {
+          this.isSimulating = false;
+        }
+      })();
+    });
+
+    // API to stop any running stress tests
+    this.app.post('/api/stress/stop', (req: Request, res: Response) => {
+      this.isSeeding = false;
+      this.isSimulating = false;
+      console.log('[Dashboard Stress API] All background stress tests stopped.');
+      res.json({ success: true, message: 'Stress operations stopped.' });
+    });
+
+    // API to check stress status
+    this.app.get('/api/stress/status', (req: Request, res: Response) => {
+      res.json({
+        isSeeding: this.isSeeding,
+        isSimulating: this.isSimulating
+      });
     });
   }
 }

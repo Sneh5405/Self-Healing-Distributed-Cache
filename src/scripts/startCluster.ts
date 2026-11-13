@@ -1,12 +1,27 @@
+import * as os from 'os';
 import { CacheNodeServer } from '../network/server';
 import { ClientProxy } from '../network/proxy';
 
+function getLocalIp(): string {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] || []) {
+      if (net.family === 'IPv4' && !net.internal && !net.address.startsWith('169.254')) {
+        return net.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
 async function main() {
-  const ports = [8001, 8002, 8003];
+  const proxyPort = parseInt(process.env.PORT || '8000', 10);
+  const baseNodePort = proxyPort === 8000 ? 8001 : 18001;
+  const ports = [baseNodePort, baseNodePort + 1, baseNodePort + 2];
   const host = 'localhost';
   const seeds = ports.map((port) => `http://${host}:${port}`);
   
-  console.log('[Cluster Bootstrap] Starting 3 cache nodes...');
+  console.log(`[Cluster Bootstrap] Starting 3 cache nodes (ports ${ports.join(', ')})...`);
   const nodes: CacheNodeServer[] = [];
   
   for (const port of ports) {
@@ -18,9 +33,9 @@ async function main() {
     nodes.push(node);
   }
 
-  console.log('[Cluster Bootstrap] Starting Client Proxy Gateway on port 8000...');
+  console.log(`[Cluster Bootstrap] Starting Client Proxy Gateway on port ${proxyPort}...`);
   const proxy = new ClientProxy({
-    port: 8000,
+    port: proxyPort,
     seedUrls: seeds,
     replicationFactor: 2,
     maxRetries: 1, // Allow 1 retry on replica if primary fails
@@ -44,11 +59,14 @@ async function main() {
   
   await proxy.start();
 
+  const localIp = getLocalIp();
+
   console.log('\n=============================================================');
   console.log('  CLUSTER IS FULLY RUNNING AND OPERATIONAL!                  ');
-  console.log('  - Gateway Proxy: http://localhost:8000                     ');
-  console.log('  - Dashboard:     http://localhost:8000/dashboard           ');
-  console.log('  - Cache Nodes:   http://localhost:8001 to 8005            ');
+  console.log(`  - Local Access:   http://localhost:${proxyPort}/dashboard          `);
+  console.log(`  - Network Access: http://${localIp}:${proxyPort}/dashboard         `);
+  console.log('    (Share this link with your professor on the same Wi-Fi!) ');
+  console.log(`  - Cache Nodes:    Ports ${ports[0]} to ${ports[ports.length - 1] + 5} (Listening on 0.0.0.0)`);
   console.log('=============================================================\n');
   
   // Clean shutdown
